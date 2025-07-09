@@ -3,7 +3,7 @@
 use std::{
     io::{stdout, Write},
     sync::{Arc, Mutex},
-    thread::{self, sleep},
+    thread::sleep,
     time::Duration,
 };
 
@@ -106,9 +106,15 @@ async fn main() {
             }
         } else {
         }
-        let std_holder = std.clone();
-        print_friendly_plane(x_holder, y_holder);
-        std.lock().unwrap().flush().unwrap();
+        match print_friendly_plane(plane_holder.clone() , std.clone()) {
+            Err(()) => {
+                disable_raw_mode().unwrap();
+                return;
+            },
+
+            Ok(()) => {},
+        }
+        stdout().flush().unwrap();
 
         if cnt % 30 == 0 {
             let holder = plane_holder.clone();
@@ -116,26 +122,75 @@ async fn main() {
                 friendly_plane_fireing(x_holder, y_holder, holder);
             });
         }
-        if cnt % 50 == 0 && enemies_holder.lock().unwrap().len() < 4{
+        if cnt % 50 == 0 && enemies_holder.lock().unwrap().len() < 4 {
             let holder = enemies_holder.clone();
             spawn_enemy_planes(holder);
         }
 
-        if cnt % 60 == 0{
+        if cnt % 60 == 0 {
             let enemy_clone = enemies_holder.clone();
             for enemy in enemy_clone.lock().unwrap().iter() {
                 let holder = plane_holder.clone();
-                let enemy = enemy.clone(); 
+                let std_holder = std.clone();
+                let enemy = enemy.clone();
                 tokio::spawn(async move {
-                    enemye_plane_fireing(&enemy, holder).await;
+                    enemye_plane_fireing(&enemy, holder, std_holder).await;
                 });
             }
         }
     }
 }
 
-fn print_friendly_plane(x: u16, y: u16) {
-    queue!(stdout(), cursor::MoveTo(x, y), Print("⍊⍊⏏⍊⍊")).unwrap();
+fn print_friendly_plane(plane: Arc<Mutex<Plane>>, std: Arc<Mutex<std::io::Stdout>>) -> Result<() , ()>{
+    let (x, y, health) = {
+        let plane_lock = plane.lock().unwrap();
+        (
+            plane_lock.coordinate.0,
+            plane_lock.coordinate.1,
+            plane_lock.health_point,
+        )
+    };
+
+    if health == 0 {
+        return Err(());
+    }
+
+    let mut out = std.lock().unwrap();
+
+    queue!(out, cursor::MoveTo(x, y), Print("⍊⍊⏏⍊⍊")).unwrap();
+
+    let bar_x = 55;
+    let bar_y = 5;
+    let bar_length = 20;
+
+    let filled_len = (health as f32 / 100.0 * bar_length as f32).round() as usize;
+    let empty_len = bar_length - filled_len;
+
+    let color = if health > 66 {
+        Color::Green
+    } else if health > 33 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+
+    // چاپ لیبل و نوار
+    queue!(
+        out,
+        cursor::MoveTo(bar_x, bar_y - 1),
+        SetForegroundColor(Color::White),
+        Print("HP"),
+        SetForegroundColor(color),
+        cursor::MoveTo(bar_x, bar_y),
+        Print("▉".repeat(filled_len)),
+        SetForegroundColor(Color::Grey),
+        Print("░".repeat(empty_len)),
+        SetForegroundColor(Color::Reset),
+    )
+    .unwrap();
+
+    out.flush().unwrap();
+    Ok(())
 }
 
 fn clear_friendly_plane(x: u16, y: u16) {
@@ -239,26 +294,63 @@ fn spawn_enemy_planes(array: Arc<Mutex<Vec<EnemyPlane>>>) {
     array2.push(new_plane);
 }
 
-async fn enemye_plane_fireing(plane: &EnemyPlane, friendly_plane: Arc<Mutex<Plane>>) {
-    // sleep(Duration::from_millis(2000));
+async fn enemye_plane_fireing(
+    plane: &EnemyPlane,
+    friendly_plane: Arc<Mutex<Plane>>,
+    std: Arc<Mutex<std::io::Stdout>>,
+) {
     let (x_holder, y_holder) = plane.coordinate;
-    let fr_plane_holder = friendly_plane.clone();
-    for y in y_holder + 1..37 {
+
+    for y in y_holder + 2..37 {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        queue!(
-            stdout(),
-            cursor::MoveTo(x_holder, y),
-            Print("●"),
-            cursor::MoveTo(x_holder, y - 1),
-            Print(" ")
-        )
-        .unwrap();
-        if y >= 20 {
-            let (fr_x_holder, fr_y_holder) = fr_plane_holder.lock().unwrap().coordinate;
-            if (y - 1 == fr_y_holder) && (x_holder >= fr_x_holder && x_holder <= fr_x_holder + 4) {
-                break;
+
+        {
+            let mut out = std.lock().unwrap();
+            queue!(
+                out,
+                cursor::MoveTo(x_holder + 1, y),
+                Print("●"),
+                cursor::MoveTo(x_holder + 1, y - 1),
+                Print(" ")
+            )
+            .unwrap();
+            out.flush().unwrap();
+        }
+
+        // گرفتن مختصات پلیر بدون قفل نگه داشتن بلندمدت
+        let (fx, fy) = {
+            let plane = friendly_plane.lock().unwrap();
+            let coord = plane.coordinate;
+            (coord.0, coord.1)
+        };
+
+        // برخورد؟
+        if (y == fy || y + 1 == fy || y - 1 == fy) && (x_holder + 1 >= fx && x_holder + 1 <= fx + 4) {
+            {
+                // کم کردن hp
+                let mut plane = friendly_plane.lock().unwrap();
+                if plane.health_point >= 20 {
+                    plane.health_point -= 20;
+                } else {
+                    plane.health_point = 0;
+                }
             }
+
+            // نمایش برخورد
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            {
+                let mut out = std.lock().unwrap();
+                queue!(out, cursor::MoveTo(x_holder + 1, y), Print(" ")).unwrap();
+                out.flush().unwrap();
+            }
+
+            break;
         }
     }
-    stdout().flush().unwrap();
+
+    {
+        let mut out = std.lock().unwrap();
+        queue!(out, cursor::MoveTo(x_holder + 1 , 36), Print(" ")).unwrap();
+        out.flush().unwrap();
+    }
 }
