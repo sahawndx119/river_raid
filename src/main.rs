@@ -3,7 +3,7 @@
 use std::{
     io::{stdout, Write},
     sync::{Arc, Mutex},
-    thread::sleep,
+    thread::{self, sleep},
     time::Duration,
 };
 
@@ -22,14 +22,16 @@ struct Plane {
     coordinate: (u16, u16),
 }
 
+#[derive(Clone, Copy)]
 struct EnemyPlane {
     max_health: u16,
     health_point: u16,
     coordinate: (u16, u16),
 }
 
-fn main() {
-    let std:Arc<Mutex<std::io::Stdout>> = Arc::new(Mutex::new(stdout()));
+#[tokio::main]
+async fn main() {
+    let std: Arc<Mutex<std::io::Stdout>> = Arc::new(Mutex::new(stdout()));
     enable_raw_mode().unwrap();
     queue!(
         stdout(),
@@ -56,12 +58,12 @@ fn main() {
 
     let mut x_holder = plane_holder.lock().unwrap().coordinate.0;
     let mut y_holder = plane_holder.lock().unwrap().coordinate.1;
-    let mut health_point = plane_holder.lock().unwrap().health_point;
+    let _health_point = plane_holder.lock().unwrap().health_point;
 
     let mut cnt = 1;
     loop {
         cnt += 1;
-        if poll(Duration::from_millis(200)).unwrap() {
+        if poll(Duration::from_millis(350)).unwrap() {
             if let Event::Key(key_event) = event::read().unwrap() {
                 clear_friendly_plane(x_holder, y_holder);
                 match key_event.code {
@@ -105,25 +107,35 @@ fn main() {
         } else {
         }
         let std_holder = std.clone();
-        print_friendly_plane(x_holder, y_holder , std_holder);
-        stdout().flush().unwrap();
+        print_friendly_plane(x_holder, y_holder);
+        std.lock().unwrap().flush().unwrap();
 
         if cnt % 30 == 0 {
             let holder = plane_holder.clone();
-            let std_holder = std.clone();
             let _ = std::thread::spawn(move || {
-                friendly_plane_fireing(x_holder, y_holder, holder , std_holder);
+                friendly_plane_fireing(x_holder, y_holder, holder);
             });
         }
-        if cnt % 50 == 0 {
+        if cnt % 50 == 0 && enemies_holder.lock().unwrap().len() < 4{
             let holder = enemies_holder.clone();
             spawn_enemy_planes(holder);
+        }
+
+        if cnt % 60 == 0{
+            let enemy_clone = enemies_holder.clone();
+            for enemy in enemy_clone.lock().unwrap().iter() {
+                let holder = plane_holder.clone();
+                let enemy = enemy.clone(); 
+                tokio::spawn(async move {
+                    enemye_plane_fireing(&enemy, holder).await;
+                });
+            }
         }
     }
 }
 
-fn print_friendly_plane(x: u16, y: u16 , std : Arc<Mutex<std::io::Stdout>>) {
-    queue!(std.lock().unwrap(), cursor::MoveTo(x, y), Print("⍊⍊⏏⍊⍊")).unwrap();
+fn print_friendly_plane(x: u16, y: u16) {
+    queue!(stdout(), cursor::MoveTo(x, y), Print("⍊⍊⏏⍊⍊")).unwrap();
 }
 
 fn clear_friendly_plane(x: u16, y: u16) {
@@ -145,28 +157,27 @@ fn print_playground() {
     stdout().flush().unwrap();
 }
 
-fn friendly_plane_fireing(x: u16, y: u16, plane: Arc<Mutex<Plane>> , std : Arc<Mutex<std::io::Stdout>>) {
+fn friendly_plane_fireing(x: u16, y: u16, plane: Arc<Mutex<Plane>>) {
     for j in 0..y {
         let (x_holder, y_holder) = plane.lock().unwrap().coordinate;
         if (y_holder == y - j - 1) && (x + 2 >= x_holder && x + 2 <= x_holder + 4) {
             sleep(Duration::from_millis(300));
-            queue!(std.lock().unwrap(), cursor::MoveTo(x + 2, y - 2 - j), Print("⌂")).unwrap();
+            queue!(stdout(), cursor::MoveTo(x + 2, y - 2 - j), Print("⌂")).unwrap();
             if j != 0 {
-                queue!(std.lock().unwrap(), cursor::MoveTo(x + 2, y - j), Print(" ")).unwrap();
+                queue!(stdout(), cursor::MoveTo(x + 2, y - j), Print(" ")).unwrap();
             }
-        } else if ((y_holder == y - j) && (x + 2 >= x_holder && x + 2 <= x_holder + 4))  && j != 0 {
+        } else if ((y_holder == y - j) && (x + 2 >= x_holder && x + 2 <= x_holder + 4)) && j != 0 {
             sleep(Duration::from_millis(300));
-            queue!(std.lock().unwrap(), cursor::MoveTo(x + 2, y - 2 - j), Print("⌂")).unwrap();
+            queue!(stdout(), cursor::MoveTo(x + 2, y - 2 - j), Print("⌂")).unwrap();
             if j != 0 {
-                queue!(std.lock().unwrap(), cursor::MoveTo(x + 2, y - j - 1), Print(" ")).unwrap();
+                queue!(stdout(), cursor::MoveTo(x + 2, y - j - 1), Print(" ")).unwrap();
             }
         } else {
             sleep(Duration::from_millis(300));
-            queue!(std.lock().unwrap(), cursor::MoveTo(x + 2, y - 1 - j), Print("⌂")).unwrap();
+            queue!(stdout(), cursor::MoveTo(x + 2, y - 1 - j), Print("⌂")).unwrap();
             if j != 0 {
-                queue!(std.lock().unwrap(), cursor::MoveTo(x + 2, y - j), Print(" ")).unwrap();
+                queue!(stdout(), cursor::MoveTo(x + 2, y - j), Print(" ")).unwrap();
             }
-            std.lock().unwrap().flush().unwrap();
         }
     }
     stdout().flush().unwrap();
@@ -180,9 +191,10 @@ fn spawn_enemy_planes(array: Arc<Mutex<Vec<EnemyPlane>>>) {
         let y_in = rand::thread_rng().gen_range(1..13);
 
         let array2 = array.lock().unwrap();
-        let res = array2
-            .iter()
-            .find(|plane| x_in == plane.coordinate.0 || y_in == plane.coordinate.1);
+        let res = array2.iter().find(|plane| {
+            (x_in >= plane.coordinate.0 && x_in <= plane.coordinate.0 + 2)
+                || y_in == plane.coordinate.1
+        });
         match res {
             Some(_) => {}
             None => {
@@ -209,7 +221,7 @@ fn spawn_enemy_planes(array: Arc<Mutex<Vec<EnemyPlane>>>) {
         Color::Red
     };
 
-    let filled = (new_plane.health_point / 20) as usize; // چند تا خانهٔ پر
+    let filled = (new_plane.health_point / 20) as usize;
     let empty = ((new_plane.max_health - new_plane.health_point) / 20) as usize;
 
     queue!(
@@ -225,4 +237,28 @@ fn spawn_enemy_planes(array: Arc<Mutex<Vec<EnemyPlane>>>) {
 
     let mut array2 = array.lock().unwrap();
     array2.push(new_plane);
+}
+
+async fn enemye_plane_fireing(plane: &EnemyPlane, friendly_plane: Arc<Mutex<Plane>>) {
+    // sleep(Duration::from_millis(2000));
+    let (x_holder, y_holder) = plane.coordinate;
+    let fr_plane_holder = friendly_plane.clone();
+    for y in y_holder + 1..37 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        queue!(
+            stdout(),
+            cursor::MoveTo(x_holder, y),
+            Print("●"),
+            cursor::MoveTo(x_holder, y - 1),
+            Print(" ")
+        )
+        .unwrap();
+        if y >= 20 {
+            let (fr_x_holder, fr_y_holder) = fr_plane_holder.lock().unwrap().coordinate;
+            if (y - 1 == fr_y_holder) && (x_holder >= fr_x_holder && x_holder <= fr_x_holder + 4) {
+                break;
+            }
+        }
+    }
+    stdout().flush().unwrap();
 }
