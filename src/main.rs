@@ -54,6 +54,8 @@ async fn main() {
     stdout().flush().unwrap();
 
     let enemies: Vec<EnemyPlane> = Vec::new();
+    let enemies_coors: Vec<(u16, u16)> = Vec::new();
+    let enemies_coors_holder = Arc::new(Mutex::new(enemies_coors));
     let enemies_holder = Arc::new(Mutex::new(enemies));
 
     let mut x_holder = plane_holder.lock().unwrap().coordinate.0;
@@ -106,28 +108,78 @@ async fn main() {
             }
         } else {
         }
-        match print_friendly_plane(plane_holder.clone() , std.clone()) {
+        match print_friendly_plane(plane_holder.clone(), std.clone()) {
             Err(()) => {
+                queue!(
+                    stdout(),
+                    crossterm::terminal::Clear(terminal::ClearType::All)
+                )
+                .unwrap();
+                let mut out = stdout();
+                let text = "GAME OVER";
+                let x = (50 - text.len() as u16) / 2;
+                let y = 20;
+
+                queue!(
+                    out,
+                    cursor::MoveTo(x, y),
+                    SetForegroundColor(Color::Red),
+                    Print(text),
+                    SetForegroundColor(Color::Reset)
+                )
+                .unwrap();
+
+                out.flush().unwrap();
+
                 disable_raw_mode().unwrap();
                 return;
-            },
+            }
 
-            Ok(()) => {},
+            Ok(()) => {}
         }
+        let enemy_holder_clone = enemies_holder.clone();
+        let std_holder = std.clone();
+        let enemy_coor_holder_clone = enemies_coors_holder.clone();
+        let _update_enemy_handle = std::thread::spawn(move || {
+            let changed_health =
+                <Vec<EnemyPlane> as Clone>::clone(&enemy_holder_clone.lock().unwrap())
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, plane)| plane.health_point != 60)
+                    .map(|(index, plane)| {
+                        (
+                            index,
+                            plane.coordinate.0,
+                            plane.coordinate.1,
+                            plane.health_point,
+                        )
+                    });
+            for (index, x, y, hp) in changed_health {
+                let another_holder = std_holder.clone();
+                update_enemy_plane((x, y), hp, another_holder);
+                if hp == 0 {
+                    enemy_holder_clone.lock().unwrap().remove(index);
+                    enemy_coor_holder_clone.lock().unwrap().remove(index);
+                }
+            }
+        });
+
         stdout().flush().unwrap();
 
         if cnt % 30 == 0 {
             let holder = plane_holder.clone();
+            let coor_holder = enemies_coors_holder.clone();
+            let enemy_holder_clone = enemies_holder.clone();
             let _ = std::thread::spawn(move || {
-                friendly_plane_fireing(x_holder, y_holder, holder);
+                friendly_plane_fireing(x_holder, y_holder, holder, coor_holder, enemy_holder_clone);
             });
         }
         if cnt % 50 == 0 && enemies_holder.lock().unwrap().len() < 4 {
             let holder = enemies_holder.clone();
-            spawn_enemy_planes(holder);
+            spawn_enemy_planes(holder, enemies_coors_holder.clone(), std.clone());
         }
 
-        if cnt % 60 == 0 {
+        if cnt % 70 == 0 {
             let enemy_clone = enemies_holder.clone();
             for enemy in enemy_clone.lock().unwrap().iter() {
                 let holder = plane_holder.clone();
@@ -141,7 +193,10 @@ async fn main() {
     }
 }
 
-fn print_friendly_plane(plane: Arc<Mutex<Plane>>, std: Arc<Mutex<std::io::Stdout>>) -> Result<() , ()>{
+fn print_friendly_plane(
+    plane: Arc<Mutex<Plane>>,
+    std: Arc<Mutex<std::io::Stdout>>,
+) -> Result<(), ()> {
     let (x, y, health) = {
         let plane_lock = plane.lock().unwrap();
         (
@@ -174,7 +229,6 @@ fn print_friendly_plane(plane: Arc<Mutex<Plane>>, std: Arc<Mutex<std::io::Stdout
         Color::Red
     };
 
-    // چاپ لیبل و نوار
     queue!(
         out,
         cursor::MoveTo(bar_x, bar_y - 1),
@@ -212,8 +266,31 @@ fn print_playground() {
     stdout().flush().unwrap();
 }
 
-fn friendly_plane_fireing(x: u16, y: u16, plane: Arc<Mutex<Plane>>) {
+fn friendly_plane_fireing(
+    x: u16,
+    y: u16,
+    plane: Arc<Mutex<Plane>>,
+    enemy_coors: Arc<Mutex<Vec<(u16, u16)>>>,
+    enemies: Arc<Mutex<Vec<EnemyPlane>>>,
+) {
     for j in 0..y {
+        if (y - 1 - j) <= 20 {
+            let res = enemy_coors.lock().unwrap().iter().position(|coor| {
+                ((y - 1 - j) == coor.1) && (x + 2 >= coor.0 && x + 2 <= coor.0 + 2)
+            });
+
+            match res {
+                Some(index) => {
+                    if enemies.lock().unwrap()[index].health_point != 0 {
+                        enemies.lock().unwrap()[index].health_point -= 20;
+                    }
+                    sleep(Duration::from_millis(300));
+                    queue!(stdout(), cursor::MoveTo(x + 2, y - j), Print(" ")).unwrap();
+                    break;
+                }
+                None => {}
+            }
+        }
         let (x_holder, y_holder) = plane.lock().unwrap().coordinate;
         if (y_holder == y - j - 1) && (x + 2 >= x_holder && x + 2 <= x_holder + 4) {
             sleep(Duration::from_millis(300));
@@ -238,7 +315,11 @@ fn friendly_plane_fireing(x: u16, y: u16, plane: Arc<Mutex<Plane>>) {
     stdout().flush().unwrap();
     execute!(stdout(), cursor::MoveTo(x + 2, 0), Print(" ")).unwrap();
 }
-fn spawn_enemy_planes(array: Arc<Mutex<Vec<EnemyPlane>>>) {
+fn spawn_enemy_planes(
+    array: Arc<Mutex<Vec<EnemyPlane>>>,
+    coors: Arc<Mutex<Vec<(u16, u16)>>>,
+    std: Arc<Mutex<std::io::Stdout>>,
+) {
     let x;
     let y;
     loop {
@@ -247,7 +328,7 @@ fn spawn_enemy_planes(array: Arc<Mutex<Vec<EnemyPlane>>>) {
 
         let array2 = array.lock().unwrap();
         let res = array2.iter().find(|plane| {
-            (x_in >= plane.coordinate.0 && x_in <= plane.coordinate.0 + 2)
+            (x_in + 2 >= plane.coordinate.0 && x_in + 2 <= plane.coordinate.0 + 2)
                 || y_in == plane.coordinate.1
         });
         match res {
@@ -265,7 +346,10 @@ fn spawn_enemy_planes(array: Arc<Mutex<Vec<EnemyPlane>>>) {
         coordinate: (x, y),
     };
 
-    execute!(stdout(), cursor::MoveTo(x, y), Print("-⌄-")).unwrap();
+    {
+        let mut out = std.lock().unwrap();
+        queue!(out, cursor::MoveTo(x, y), Print("-⌄-")).unwrap();
+    }
 
     let pct = new_plane.health_point as f32 / new_plane.max_health as f32;
     let color = if pct > 0.66 {
@@ -278,20 +362,23 @@ fn spawn_enemy_planes(array: Arc<Mutex<Vec<EnemyPlane>>>) {
 
     let filled = (new_plane.health_point / 20) as usize;
     let empty = ((new_plane.max_health - new_plane.health_point) / 20) as usize;
-
-    queue!(
-        stdout(),
-        cursor::MoveTo(new_plane.coordinate.0, new_plane.coordinate.1 - 1),
-        SetForegroundColor(color),
-        Print("▮".repeat(filled)),
-        SetForegroundColor(Color::Grey),
-        Print("▯".repeat(empty)),
-        SetForegroundColor(Color::Reset),
-    )
-    .unwrap();
+    {
+        let mut out = std.lock().unwrap();
+        queue!(
+            out,
+            cursor::MoveTo(new_plane.coordinate.0, new_plane.coordinate.1 - 1),
+            SetForegroundColor(color),
+            Print("▮".repeat(filled)),
+            SetForegroundColor(Color::Grey),
+            Print("▯".repeat(empty)),
+            SetForegroundColor(Color::Reset),
+        )
+        .unwrap();
+    }
 
     let mut array2 = array.lock().unwrap();
     array2.push(new_plane);
+    coors.lock().unwrap().push(new_plane.coordinate);
 }
 
 async fn enemye_plane_fireing(
@@ -317,17 +404,15 @@ async fn enemye_plane_fireing(
             out.flush().unwrap();
         }
 
-        // گرفتن مختصات پلیر بدون قفل نگه داشتن بلندمدت
         let (fx, fy) = {
             let plane = friendly_plane.lock().unwrap();
             let coord = plane.coordinate;
             (coord.0, coord.1)
         };
 
-        // برخورد؟
-        if (y == fy || y + 1 == fy || y - 1 == fy) && (x_holder + 1 >= fx && x_holder + 1 <= fx + 4) {
+        if (y == fy || y + 1 == fy || y - 1 == fy) && (x_holder + 1 >= fx && x_holder + 1 <= fx + 4)
+        {
             {
-                // کم کردن hp
                 let mut plane = friendly_plane.lock().unwrap();
                 if plane.health_point >= 20 {
                     plane.health_point -= 20;
@@ -336,7 +421,6 @@ async fn enemye_plane_fireing(
                 }
             }
 
-            // نمایش برخورد
             tokio::time::sleep(Duration::from_millis(400)).await;
             {
                 let mut out = std.lock().unwrap();
@@ -350,7 +434,51 @@ async fn enemye_plane_fireing(
 
     {
         let mut out = std.lock().unwrap();
-        queue!(out, cursor::MoveTo(x_holder + 1 , 36), Print(" ")).unwrap();
+        queue!(out, cursor::MoveTo(x_holder + 1, 36), Print(" ")).unwrap();
         out.flush().unwrap();
+    }
+}
+
+fn update_enemy_plane(coors: (u16, u16), health: u16, std: Arc<Mutex<std::io::Stdout>>) {
+    if health == 0 {
+        for j in 0..2 {
+            for i in 0..3 {
+                {
+                    let out = std.clone();
+                    queue!(
+                        out.lock().unwrap(),
+                        cursor::MoveTo(coors.0 + i, coors.1 - j),
+                        Print(" ")
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        return;
+    }
+    let pct = health as f32 / 60.0;
+    let color = if pct > 0.66 {
+        Color::Green
+    } else if pct > 0.33 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+
+    let filled = (health / 20) as usize;
+    let empty = ((60 - health) / 20) as usize;
+
+    {
+        let out = std.clone();
+        queue!(
+            out.lock().unwrap(),
+            cursor::MoveTo(coors.0, coors.1 - 1),
+            SetForegroundColor(color),
+            Print("▮".repeat(filled)),
+            SetForegroundColor(Color::Grey),
+            Print("▯".repeat(empty)),
+            SetForegroundColor(Color::Reset),
+        )
+        .unwrap();
     }
 }
