@@ -141,19 +141,20 @@ async fn main() {
         let std_holder = std.clone();
         let enemy_coor_holder_clone = enemies_coors_holder.clone();
         let _update_enemy_handle = std::thread::spawn(move || {
-            let changed_health =
-                <Vec<EnemyPlane> as Clone>::clone(&enemy_holder_clone.lock().unwrap())
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(_, plane)| plane.health_point != 60)
-                    .map(|(index, plane)| {
-                        (
-                            index,
-                            plane.coordinate.0,
-                            plane.coordinate.1,
-                            plane.health_point,
-                        )
-                    });
+            let changed_health = enemy_holder_clone.lock().unwrap().clone();
+
+            let changed_health = changed_health
+                .into_iter()
+                .enumerate()
+                .filter(|(_, plane)| plane.health_point != 60)
+                .map(|(index, plane)| {
+                    (
+                        index,
+                        plane.coordinate.0,
+                        plane.coordinate.1,
+                        plane.health_point,
+                    )
+                });
             for (index, x, y, hp) in changed_health {
                 let another_holder = std_holder.clone();
                 update_enemy_plane((x, y), hp, another_holder);
